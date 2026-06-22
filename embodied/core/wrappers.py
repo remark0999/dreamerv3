@@ -241,6 +241,86 @@ class UnifyDtypes(Wrapper):
     return results, befores, afters
 
 
+class ObservationNoise(Wrapper):
+
+  def __init__(
+      self, env, keys, noise_type='gaussian', sigma=0.0, seed=None,
+      pink_alpha=0.9, pink_mix=1.0):
+    super().__init__(env)
+    self._keys = list(keys)
+    self._noise_type = str(noise_type).lower()
+    self._sigma = float(sigma)
+    self._pink_alpha = float(pink_alpha)
+    self._pink_mix = float(pink_mix)
+    self._rng = np.random.default_rng(seed)
+    self._pink_state = {}
+    self._validate()
+
+  @property
+  def obs_space(self):
+    return self.env.obs_space
+
+  def step(self, action):
+    obs = self.env.step(action)
+    if self._noise_type == 'pink' and bool(obs['is_first']):
+      self._pink_state = {}
+    obs = obs.copy()
+    for key in self._keys:
+      image = obs[key].astype(np.float32)
+      if self._noise_type == 'gaussian':
+        image = self._apply_gaussian(image)
+      elif self._noise_type == 'pink':
+        image = self._apply_pink(key, image)
+      space = self.env.obs_space[key]
+      obs[key] = np.clip(image, space.low, space.high).astype(space.dtype)
+    return obs
+
+  def _apply_gaussian(self, image):
+    noise = self._rng.normal(
+        loc=0.0, scale=self._sigma, size=image.shape).astype(np.float32)
+    return image + noise
+
+  def _apply_pink(self, key, image):
+    prev = self._pink_state.get(key)
+    if prev is None or prev.shape != image.shape:
+      prev = np.zeros_like(image, dtype=np.float32)
+    eps = self._rng.normal(
+        loc=0.0, scale=self._sigma, size=image.shape).astype(np.float32)
+    state = self._pink_alpha * prev + (1.0 - self._pink_alpha) * eps
+    self._pink_state[key] = state
+    noise = self._pink_mix * state + (1.0 - self._pink_mix) * eps
+    return image + noise
+
+  def _validate(self):
+    if self._noise_type not in ('gaussian', 'pink'):
+      raise ValueError(
+          f"ObservationNoise type must be 'gaussian' or 'pink', got "
+          f"{self._noise_type!r}.")
+    if not self._keys:
+      raise ValueError('ObservationNoise requires at least one observation key.')
+    if not np.isfinite(self._sigma) or self._sigma < 0:
+      raise ValueError(
+          f'ObservationNoise sigma must be finite and nonnegative, '
+          f'got {self._sigma}.')
+    if not 0.0 <= self._pink_alpha <= 1.0:
+      raise ValueError(f'ObservationNoise pink_alpha must be in [0, 1], got '
+                       f'{self._pink_alpha}.')
+    if not 0.0 <= self._pink_mix <= 1.0:
+      raise ValueError(f'ObservationNoise pink_mix must be in [0, 1], got '
+                       f'{self._pink_mix}.')
+    spaces = self.env.obs_space
+    for key in self._keys:
+      if key not in spaces:
+        raise KeyError(
+            f"ObservationNoise key {key!r} is not in observation space "
+            f"{sorted(spaces)}.")
+      space = spaces[key]
+      if not (np.issubdtype(space.dtype, np.uint8) and len(space.shape) == 3):
+        raise ValueError(
+            f"ObservationNoise key {key!r} must be a rank-3 uint8 image "
+            f"space, got dtype {space.dtype} and shape {space.shape}.")
+
+
 class CheckSpaces(Wrapper):
 
   def __init__(self, env):

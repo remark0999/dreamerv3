@@ -16,6 +16,9 @@ import portal
 import ruamel.yaml as yaml
 
 
+OBS_NOISE_SEED_NAMESPACE = 0x0B50_5015
+
+
 def main(argv=None):
   from .agent import Agent
   [elements.print(line) for line in Agent.banner]
@@ -243,19 +246,35 @@ def make_env(config, index, **overrides):
   if kwargs.pop('use_logdir', False):
     kwargs['logdir'] = elements.Path(config.logdir) / f'env{index}'
   env = ctor(task, **kwargs)
-  return wrap_env(env, config)
+  return wrap_env(env, config, index)
 
 
-def wrap_env(env, config):
+def wrap_env(env, config, index=0):
   for name, space in env.act_space.items():
     if not space.discrete:
       env = embodied.wrappers.NormalizeAction(env, name)
   env = embodied.wrappers.UnifyDtypes(env)
+  obs_noise = config.get('obs_noise', {})
+  if obs_noise.get('enabled', False):
+    env = embodied.wrappers.ObservationNoise(
+        env,
+        keys=obs_noise.get('keys', []),
+        noise_type=obs_noise.get('type', 'gaussian'),
+        sigma=obs_noise.get('sigma', 0.0),
+        seed=_obs_noise_seed(config.seed, index),
+        pink_alpha=obs_noise.get('pink_alpha', 0.9),
+        pink_mix=obs_noise.get('pink_mix', 1.0))
   env = embodied.wrappers.CheckSpaces(env)
   for name, space in env.act_space.items():
     if not space.discrete:
       env = embodied.wrappers.ClipAction(env, name)
   return env
+
+
+def _obs_noise_seed(seed, index):
+  sequence = np.random.SeedSequence([
+      int(seed), int(index), OBS_NOISE_SEED_NAMESPACE])
+  return int(sequence.generate_state(1, dtype=np.uint32)[0])
 
 
 def make_stream(config, replay, mode):
