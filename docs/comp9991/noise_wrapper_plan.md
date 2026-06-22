@@ -251,11 +251,13 @@ Recommended defaults:
 obs_noise:
   enabled: False
   type: gaussian
-  keys: []
+  keys: [image]
   sigma: 0.0
   pink_alpha: 0.9
   pink_mix: 1.0
 ```
+
+`keys` defaults to `[image]` rather than an empty list because Elements Config disallows empty lists whose element type is ambiguous. This does not change clean behavior: `obs_noise.enabled: False` means the wrapper is not instantiated.
 
 Condition configs:
 

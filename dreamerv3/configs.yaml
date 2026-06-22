@@ -39,7 +39,7 @@ defaults:
   obs_noise:
     enabled: False
     type: gaussian
-    keys: []
+    keys: [image]
     sigma: 0.0
     pink_alpha: 0.9
     pink_mix: 1.0

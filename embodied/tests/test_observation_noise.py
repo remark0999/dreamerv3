@@ -1,7 +1,10 @@
+import pathlib
+
 import elements
 import embodied
 import numpy as np
 import pytest
+import ruamel.yaml as yaml
 
 from dreamerv3 import main as dreamer_main
 
@@ -83,7 +86,7 @@ def _has_noise_wrapper(env):
 
 def _config(enabled, **kwargs):
   obs_noise = dict(
-      enabled=enabled, type='gaussian', keys=[], sigma=0.0,
+      enabled=enabled, type='gaussian', keys=['image'], sigma=0.0,
       pink_alpha=0.9, pink_mix=1.0)
   obs_noise.update(kwargs)
   return elements.Config(seed=5, obs_noise=obs_noise)
@@ -282,8 +285,8 @@ class TestObservationNoise:
     with pytest.raises(ValueError, match='type'):
       embodied.wrappers.ObservationNoise(env, ['image'], noise_type='dropout')
     with pytest.raises(ValueError, match='at least one'):
-      dreamer_main.wrap_env(
-          _ImageEnv(), _config(True, keys=[]), index=0)
+      embodied.wrappers.ObservationNoise(
+          _ImageEnv(), [], noise_type='gaussian')
     with pytest.raises(KeyError, match='missing'):
       embodied.wrappers.ObservationNoise(env, ['missing'])
     with pytest.raises(ValueError, match='rank-3 uint8'):
@@ -297,3 +300,20 @@ class TestObservationNoise:
   def test_invalid_sigma(self, sigma):
     with pytest.raises(ValueError, match='finite and nonnegative'):
       embodied.wrappers.ObservationNoise(_ImageEnv(), ['image'], sigma=sigma)
+
+  def test_elements_config_conditions_parse(self):
+    path = pathlib.Path(__file__).parents[2] / 'dreamerv3' / 'configs.yaml'
+    configs = yaml.YAML(typ='safe').load(path.read_text())
+    defaults = elements.Config(configs['defaults'])
+
+    clean = defaults.update(configs['clean'])
+    g20 = defaults.update(configs['g20'])
+    pink = defaults.update(configs['pink'])
+
+    assert clean.obs_noise.enabled is False
+    assert g20.obs_noise.keys == ('image',)
+    assert g20.obs_noise.type == 'gaussian'
+    assert g20.obs_noise.sigma == 20.0
+    assert pink.obs_noise.keys == ('image',)
+    assert pink.obs_noise.type == 'pink'
+    assert pink.obs_noise.sigma == 5.0
