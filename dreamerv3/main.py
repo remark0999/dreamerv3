@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import pathlib
 import sys
@@ -17,6 +18,11 @@ import ruamel.yaml as yaml
 
 
 OBS_NOISE_SEED_NAMESPACE = 0x0B50_5015
+DMC_ENV_SEED_NAMESPACE = 0xD0C0_5EED
+DMC_ENV_SEED_DERIVATION_VERSION = 'dmc-env-seed-v1'
+DMC_ENV_SEED_DERIVATION = (
+    'np.random.SeedSequence([seed, index, namespace]).generate_state(1, '
+    'dtype=np.uint32)[0]')
 
 
 def main(argv=None):
@@ -43,6 +49,7 @@ def main(argv=None):
   if not config.script.endswith(('_env', '_replay')):
     logdir.mkdir()
     config.save(logdir / 'config.yaml')
+    _write_dmc_env_seed_metadata(config, logdir)
 
   def init():
     elements.timer.global_timer.enabled = config.logger.timer
@@ -241,7 +248,10 @@ def make_env(config, index, **overrides):
     ctor = getattr(module, cls)
   kwargs = config.env.get(suite, {})
   kwargs.update(overrides)
-  if kwargs.pop('use_seed', False):
+  use_seed = kwargs.pop('use_seed', False)
+  if suite == 'dmc':
+    kwargs['seed'] = _dmc_env_seed(config.seed, index)
+  elif use_seed:
     kwargs['seed'] = hash((config.seed, index)) % (2 ** 32 - 1)
   if kwargs.pop('use_logdir', False):
     kwargs['logdir'] = elements.Path(config.logdir) / f'env{index}'
@@ -275,6 +285,35 @@ def _obs_noise_seed(seed, index):
   sequence = np.random.SeedSequence([
       int(seed), int(index), OBS_NOISE_SEED_NAMESPACE])
   return int(sequence.generate_state(1, dtype=np.uint32)[0])
+
+
+def _dmc_env_seed(seed, index):
+  sequence = np.random.SeedSequence([
+      int(seed),
+      int(index),
+      DMC_ENV_SEED_NAMESPACE,
+  ])
+  return int(sequence.generate_state(1, dtype=np.uint32)[0])
+
+
+def _write_dmc_env_seed_metadata(config, logdir):
+  suite = config.task.split('_', 1)[0]
+  if config.script != 'train' or suite != 'dmc':
+    return
+  data = {
+      'derivation': DMC_ENV_SEED_DERIVATION,
+      'derivation_version': DMC_ENV_SEED_DERIVATION_VERSION,
+      'envs': {
+          str(index): _dmc_env_seed(config.seed, index)
+          for index in range(int(config.run.envs))
+      },
+      'namespace': DMC_ENV_SEED_NAMESPACE,
+      'script': config.script,
+      'seed': int(config.seed),
+  }
+  with open(str(logdir / 'dmc_env_seeds.json'), 'w') as f:
+    json.dump(data, f, indent=2, sort_keys=True)
+    f.write('\n')
 
 
 def make_stream(config, replay, mode):
