@@ -311,9 +311,9 @@ class TestObservationNoise:
     pink = defaults.update(configs['pink'])
 
     assert clean.obs_noise.enabled is False
-    assert g20.obs_noise.keys == ('image',)
+    assert g20.obs_noise.get('keys') == ('image',)
     assert g20.obs_noise.type == 'gaussian'
     assert g20.obs_noise.sigma == 20.0
-    assert pink.obs_noise.keys == ('image',)
+    assert pink.obs_noise.get('keys') == ('image',)
     assert pink.obs_noise.type == 'pink'
     assert pink.obs_noise.sigma == 5.0
