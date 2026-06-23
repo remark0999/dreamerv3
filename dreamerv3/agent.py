@@ -34,6 +34,7 @@ class Agent(embodied.jax.Agent):
     self.obs_space = obs_space
     self.act_space = act_space
     self.config = config
+    _validate_shadow_disagreement_config(config)
 
     exclude = ('is_first', 'is_last', 'is_terminal', 'reward')
     enc_space = {k: v for k, v in obs_space.items() if k not in exclude}
@@ -257,7 +258,7 @@ class Agent(embodied.jax.Agent):
     # Train metrics
     _, (new_carry, entries, outs, mets) = self.loss(
         carry, obs, prevact, training=False)
-    mets.update(mets)
+    metrics.update(mets)
 
     # Grad norms
     if self.config.report_gradnorms:
@@ -306,8 +307,73 @@ class Agent(embodied.jax.Agent):
       grid = video.transpose((1, 2, 0, 3, 4)).reshape((T, H, B * W, C))
       metrics[f'openloop/{key}'] = grid
 
+    shadow_config = self.config.get('shadow_disagreement', {})
+    if shadow_config.get('enabled', False):
+      metrics.update(self._shadow_disagreement_report(carry, obs, prevact))
+
     carry = (*new_carry, {k: data[k][:, -1] for k in self.act_space})
     return carry, metrics
+
+  def _shadow_disagreement_report(self, carry, obs, prevact):
+    (_, dyn_carry, _) = carry
+    reset = obs['is_first']
+    B, T = reset.shape
+    K = min(self.config.imag_last or T, T)
+    H = self.config.imag_length
+
+    _, _, tokens = self.enc(carry[0], obs, reset, training=False)
+    dyn_carry, dyn_entries, repfeat = self.dyn.observe(
+        dyn_carry, tokens, prevact, reset, training=False)
+    starts = self.dyn.starts(dyn_entries, dyn_carry, K)
+    first = jax.tree.map(
+        lambda x: x[:, -K:].reshape((B * K, 1, *x.shape[2:])), repfeat)
+    first = sg(first)
+
+    policyfn = lambda feat: sample(self.pol(self.feat2tensor(feat), 1))
+    _, reffeat, refprevact = self.dyn.imagine(
+        starts, policyfn, H, training=False)
+    reffeat = concat([first, sg(reffeat)], 1)
+
+    auxfeats = []
+    common = sg(refprevact)
+    for _ in range(2):
+      _, auxfeat, _ = self.dyn.imagine(
+          starts, common, H, training=False)
+      auxfeats.append(concat([first, sg(auxfeat)], 1))
+
+    views = [reffeat, *auxfeats]
+    voffset, vscale = self.valnorm.stats()
+    _, frozen_rscale = self.retnorm.stats()
+    stats = [
+        self._shadow_view_stats(view, voffset, vscale, frozen_rscale)
+        for view in views]
+    adv_views = jnp.stack([x['adv'] for x in stats], 0)
+    ret_views = jnp.stack([x['ret'] for x in stats], 0)
+    latent_views = jnp.stack([
+        sg(self.feat2tensor(view)) for view in views], 0)
+    return _shadow_disagreement_metrics(
+        sg(adv_views),
+        sg(ret_views),
+        sg(latent_views),
+        sg(stats[0]['ret']),
+        sg(stats[0]['tarval']),
+        sg(frozen_rscale))
+
+  def _shadow_view_stats(self, imgfeat, voffset, vscale, frozen_rscale):
+    inp = self.feat2tensor(imgfeat)
+    rew = self.rew(inp, 2).pred()
+    con = self.con(inp, 2).prob(1)
+    val = self.val(inp, 2).pred() * vscale + voffset
+    slowval = self.slowval(inp, 2).pred() * vscale + voffset
+    tarval = slowval if self.config.imag_loss.slowtar else val
+    disc = 1 if self.config.contdisc else 1 - 1 / self.config.horizon
+    last = jnp.zeros_like(con)
+    term = 1 - con
+    ret = lambda_return(
+        last, term, rew, tarval, tarval, disc, self.config.imag_loss.lam)
+    tarval = tarval[:, :-1]
+    adv = (ret - tarval) / sg(frozen_rscale)
+    return {'ret': ret, 'tarval': tarval, 'adv': adv}
 
   def _apply_replay_context(self, carry, data):
     (enc_carry, dyn_carry, dec_carry, prevact) = carry
@@ -377,6 +443,152 @@ class Agent(embodied.jax.Agent):
       sched = optax.join_schedules([ramp, sched], [warmup])
     chain.append(optax.scale_by_learning_rate(sched))
     return optax.chain(*chain)
+
+
+def _validate_shadow_disagreement_config(config):
+  shadow = config.get('shadow_disagreement', {})
+  views = shadow.get('views', 3)
+  if isinstance(views, bool) or not isinstance(views, (int, np.integer)) or (
+      views != 3):
+    raise ValueError(
+        f'shadow_disagreement.views must be exactly 3, got {views}.')
+
+
+def _shadow_direction_stats(adv_t0):
+  adv_t0 = f32(adv_t0)
+  if adv_t0.shape[0] != 3:
+    raise ValueError(
+        f'shadow disagreement requires exactly 3 total views, '
+        f'got {adv_t0.shape[0]}.')
+  adv_t0 = adv_t0.reshape((3, -1))
+  mean_abs_adv = jnp.abs(adv_t0).mean(0)
+  impact_ref = jnp.maximum(jnp.median(mean_abs_adv), f32(1e-6))
+  eps = jnp.maximum(f32(1e-6) * impact_ref, f32(1e-8))
+  valid = mean_abs_adv > f32(0.05) * impact_ref
+  raw_conflict = 1 - jnp.abs(adv_t0.mean(0)) / (mean_abs_adv + eps)
+  conflict = jnp.where(valid, jnp.clip(raw_conflict, 0, 1), 0)
+  impact_weight = mean_abs_adv / (mean_abs_adv + impact_ref)
+  relstd = jnp.where(
+      valid, adv_t0.std(0) / (mean_abs_adv + eps), 0)
+  sign_tol = f32(0.05) * impact_ref
+  mixed_sign = (
+      (adv_t0.min(0) < -sign_tol) &
+      (adv_t0.max(0) > sign_tol))
+  q75 = jnp.percentile(mean_abs_adv, 75)
+  highimpact = mean_abs_adv >= q75
+  conflict_high = conflict >= 0.5
+  return {
+      'mean_abs_adv': mean_abs_adv,
+      'impact_ref': impact_ref,
+      'eps': eps,
+      'valid': valid,
+      'conflict': conflict,
+      'impact_weight': impact_weight,
+      'relstd': relstd,
+      'mixed_sign': mixed_sign,
+      'highimpact': highimpact,
+      'conflict_high': conflict_high,
+  }
+
+
+def _shadow_disagreement_metrics(
+    adv_views, ret_views, latent_views, reference_ret, reference_tarval,
+    frozen_rscale):
+  adv_views = f32(adv_views)
+  ret_views = f32(ret_views)
+  latent_views = f32(latent_views)
+  reference_ret = f32(reference_ret)
+  reference_tarval = f32(reference_tarval)
+  frozen_rscale = f32(frozen_rscale)
+  if adv_views.ndim < 3:
+    raise ValueError(
+        f'adv_views must have shape (3, ..., horizon), got '
+        f'{adv_views.shape}.')
+  if ret_views.ndim < 3:
+    raise ValueError(
+        f'ret_views must have shape (3, ..., horizon), got '
+        f'{ret_views.shape}.')
+  if latent_views.ndim < 4:
+    raise ValueError(
+        f'latent_views must have shape (3, ..., horizon + 1, features), '
+        f'got {latent_views.shape}.')
+  if adv_views.shape[0] != 3:
+    raise ValueError(
+        f'adv_views must have exactly 3 total views, '
+        f'got {adv_views.shape[0]}.')
+  if ret_views.shape[0] != 3:
+    raise ValueError(
+        f'ret_views must have exactly 3 total views, '
+        f'got {ret_views.shape[0]}.')
+  if latent_views.shape[0] != 3:
+    raise ValueError(
+        f'latent_views must have exactly 3 total views, '
+        f'got {latent_views.shape[0]}.')
+  start_shape = adv_views.shape[1:-1]
+  horizon = adv_views.shape[-1]
+  if ret_views.shape[1:-1] != start_shape or ret_views.shape[-1] != horizon:
+    raise ValueError(
+        f'ret_views shape {ret_views.shape} is incompatible with '
+        f'adv_views shape {adv_views.shape}.')
+  if (latent_views.shape[1:-2] != start_shape or
+      latent_views.shape[-2] != horizon + 1):
+    raise ValueError(
+        f'latent_views shape {latent_views.shape} is incompatible with '
+        f'adv_views shape {adv_views.shape}.')
+  if reference_ret.shape[:-1] != start_shape or reference_ret.shape[-1] != horizon:
+    raise ValueError(
+        f'reference_ret shape {reference_ret.shape} is incompatible with '
+        f'adv_views shape {adv_views.shape}.')
+  if (reference_tarval.shape[:-1] != start_shape or
+      reference_tarval.shape[-1] != horizon):
+    raise ValueError(
+        f'reference_tarval shape {reference_tarval.shape} is incompatible '
+        f'with adv_views shape {adv_views.shape}.')
+  latent_features = int(np.prod(latent_views.shape[-1:]))
+  adv_views = adv_views.reshape((3, -1, horizon))
+  ret_views = ret_views.reshape((3, -1, horizon))
+  latent_views = latent_views.reshape(
+      (3, -1, horizon + 1, latent_features))
+  reference_ret = reference_ret.reshape((-1, horizon))
+  reference_tarval = reference_tarval.reshape((-1, horizon))
+
+  stats = _shadow_direction_stats(adv_views[:, :, 0])
+  conflict = stats['conflict']
+  impact_weight = stats['impact_weight']
+  relstd = stats['relstd']
+  eps = stats['eps']
+
+  return_mean_abs = jnp.abs(ret_views).mean(0)
+  return_relstd = ret_views.std(0) / (return_mean_abs + eps)
+  latent_absdiff = jnp.abs(latent_views[1:] - latent_views[0:1]).mean()
+  main_absadv = jnp.abs(reference_ret - reference_tarval) / frozen_rscale
+
+  return {
+      'shadow/paired_direction_conflict_weighted_t0_mean':
+          (conflict * impact_weight).mean(),
+      'shadow/paired_direction_conflict_t0_mean':
+          conflict.mean(),
+      'shadow/paired_adv_relstd_absdenom_t0_mean':
+          relstd.mean(),
+      'shadow/paired_adv_relstd_absdenom_t0_p95':
+          jnp.percentile(relstd, 95),
+      'shadow/paired_mixed_sign_t0_frac':
+          f32(stats['mixed_sign']).mean(),
+      'shadow/paired_highimpact_conflict_t0_frac':
+          f32(stats['highimpact'] & stats['conflict_high']).mean(),
+      'shadow/paired_return_relstd_absdenom_mean':
+          return_relstd.mean(),
+      'shadow/paired_return_relstd_absdenom_p95':
+          jnp.percentile(return_relstd, 95),
+      'shadow/paired_latent_absdiff_mean':
+          latent_absdiff,
+      'shadow/main_abs_normalized_advantage_t0_mean':
+          main_absadv[:, 0].mean(),
+      'shadow/main_abs_normalized_advantage_mean':
+          main_absadv.mean(),
+      'shadow/main_abs_normalized_advantage_p95':
+          jnp.percentile(main_absadv, 95),
+  }
 
 
 def imag_loss(

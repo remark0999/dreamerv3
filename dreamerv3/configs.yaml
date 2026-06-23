@@ -124,6 +124,7 @@ defaults:
     repval_grad: True
     report: True
     report_gradnorms: False
+    shadow_disagreement: {enabled: False, views: 3}
 
 size1m: &size1m
   .*\.rssm: {deter: 512, hidden: 64, classes: 4}
@@ -210,6 +211,13 @@ pink:
   obs_noise.sigma: 5.0
   obs_noise.pink_alpha: 0.9
   obs_noise.pink_mix: 1.0
+
+shadow_disagreement:
+  agent.shadow_disagreement.enabled: True
+  agent.shadow_disagreement.views: 3
+  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/'
+  run.report_every: 30
+  run.report_batches: 1
 
 bsuite:
   task: bsuite_mnist/0
