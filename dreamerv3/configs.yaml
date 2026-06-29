@@ -43,6 +43,11 @@ defaults:
     sigma: 0.0
     pink_alpha: 0.9
     pink_mix: 1.0
+    clean_prob: 0.0
+    pink_prob: 0.0
+    dropout_prob: 0.0
+    dropout_value: 0
+    log_stats: True
 
   replay:
     size: 5e6
@@ -211,6 +216,30 @@ pink:
   obs_noise.sigma: 5.0
   obs_noise.pink_alpha: 0.9
   obs_noise.pink_mix: 1.0
+
+mixdrop30:
+  obs_noise.enabled: True
+  obs_noise.type: mixdrop
+  obs_noise.keys: [image]
+  obs_noise.clean_prob: 0.70
+  obs_noise.dropout_prob: 0.30
+  obs_noise.dropout_value: 0
+  obs_noise.log_stats: True
+  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise'
+
+mixpinkdrop:
+  obs_noise.enabled: True
+  obs_noise.type: mixpinkdrop
+  obs_noise.keys: [image]
+  obs_noise.clean_prob: 0.60
+  obs_noise.pink_prob: 0.25
+  obs_noise.dropout_prob: 0.15
+  obs_noise.sigma: 5.0
+  obs_noise.pink_alpha: 0.9
+  obs_noise.pink_mix: 1.0
+  obs_noise.dropout_value: 0
+  obs_noise.log_stats: True
+  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise'
 
 shadow_disagreement:
   agent.shadow_disagreement.enabled: True

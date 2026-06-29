@@ -265,6 +265,7 @@ def wrap_env(env, config, index=0):
       env = embodied.wrappers.NormalizeAction(env, name)
   env = embodied.wrappers.UnifyDtypes(env)
   obs_noise = config.get('obs_noise', {})
+  env = embodied.wrappers.CheckSpaces(env)
   if obs_noise.get('enabled', False):
     env = embodied.wrappers.ObservationNoise(
         env,
@@ -273,8 +274,12 @@ def wrap_env(env, config, index=0):
         sigma=obs_noise.get('sigma', 0.0),
         seed=_obs_noise_seed(config.seed, index),
         pink_alpha=obs_noise.get('pink_alpha', 0.9),
-        pink_mix=obs_noise.get('pink_mix', 1.0))
-  env = embodied.wrappers.CheckSpaces(env)
+        pink_mix=obs_noise.get('pink_mix', 1.0),
+        clean_prob=obs_noise.get('clean_prob', 0.0),
+        pink_prob=obs_noise.get('pink_prob', 0.0),
+        dropout_prob=obs_noise.get('dropout_prob', 0.0),
+        dropout_value=obs_noise.get('dropout_value', 0),
+        log_stats=obs_noise.get('log_stats', True))
   for name, space in env.act_space.items():
     if not space.discrete:
       env = embodied.wrappers.ClipAction(env, name)

@@ -243,18 +243,42 @@ class UnifyDtypes(Wrapper):
 
 class ObservationNoise(Wrapper):
 
+  _CODES = {
+      'clean': 0,
+      'pink': 1,
+      'dropout': 2,
+      'gaussian': 3,
+  }
+
   def __init__(
       self, env, keys, noise_type='gaussian', sigma=0.0, seed=None,
-      pink_alpha=0.9, pink_mix=1.0):
+      pink_alpha=0.9, pink_mix=1.0, clean_prob=0.0, pink_prob=0.0,
+      dropout_prob=0.0, dropout_value=0, log_stats=True):
     super().__init__(env)
     self._keys = list(keys)
     self._noise_type = str(noise_type).lower()
     self._sigma = float(sigma)
     self._pink_alpha = float(pink_alpha)
     self._pink_mix = float(pink_mix)
+    self._clean_prob = float(clean_prob)
+    self._pink_prob = float(pink_prob)
+    self._dropout_prob = float(dropout_prob)
+    self._dropout_value = float(dropout_value)
+    self._log_stats = bool(log_stats)
     self._rng = np.random.default_rng(seed)
     self._pink_state = {}
     self._validate()
+
+    self._mixdrop_probs = None
+    self._mixpinkdrop_probs = None
+    if self._noise_type == 'mixdrop':
+      self._mixdrop_probs = self._normalize_probs(
+          ('clean_prob', 'dropout_prob'),
+          (self._clean_prob, self._dropout_prob))
+    if self._noise_type == 'mixpinkdrop':
+      self._mixpinkdrop_probs = self._normalize_probs(
+          ('clean_prob', 'pink_prob', 'dropout_prob'),
+          (self._clean_prob, self._pink_prob, self._dropout_prob))
 
   @property
   def obs_space(self):
@@ -262,18 +286,54 @@ class ObservationNoise(Wrapper):
 
   def step(self, action):
     obs = self.env.step(action)
-    if self._noise_type == 'pink' and bool(obs['is_first']):
+    is_first = bool(np.asarray(obs.get('is_first', False)))
+    if is_first:
       self._pink_state = {}
+
     obs = obs.copy()
+    mode = self._select_mode()
+
+    absdiffs = []
     for key in self._keys:
-      image = obs[key].astype(np.float32)
-      if self._noise_type == 'gaussian':
-        image = self._apply_gaussian(image)
-      elif self._noise_type == 'pink':
-        image = self._apply_pink(key, image)
+      original = obs[key].astype(np.float32)
+
+      if mode == 'clean':
+        image = original
+      elif mode == 'gaussian':
+        image = self._apply_gaussian(original)
+      elif mode == 'pink':
+        image = self._apply_pink(key, original)
+      elif mode == 'dropout':
+        image = self._apply_dropout(original)
+      else:
+        raise NotImplementedError(mode)
+
       space = self.env.obs_space[key]
-      obs[key] = np.clip(image, space.low, space.high).astype(space.dtype)
+      clipped = np.clip(image, space.low, space.high).astype(space.dtype)
+      obs[key] = clipped
+
+      absdiff = np.abs(clipped.astype(np.float32) - original).mean()
+      absdiffs.append(float(absdiff))
+
+    if self._log_stats:
+      input_absdiff = float(np.mean(absdiffs)) if absdiffs else 0.0
+      obs['log/obs_noise_code'] = np.asarray(self._CODES[mode], dtype=np.int32)
+      obs['log/obs_noise_is_corrupt'] = np.asarray(float(mode != 'clean'), dtype=np.float32)
+      obs['log/obs_noise_is_dropout'] = np.asarray(float(mode == 'dropout'), dtype=np.float32)
+      obs['log/obs_noise_is_pink'] = np.asarray(float(mode == 'pink'), dtype=np.float32)
+      obs['log/obs_noise_input_absdiff'] = np.asarray(input_absdiff, dtype=np.float32)
+
     return obs
+
+  def _select_mode(self):
+    if self._noise_type in ('gaussian', 'pink', 'dropout'):
+      return self._noise_type
+    if self._noise_type == 'mixdrop':
+      return str(self._rng.choice(('clean', 'dropout'), p=self._mixdrop_probs))
+    if self._noise_type == 'mixpinkdrop':
+      return str(self._rng.choice(
+          ('clean', 'pink', 'dropout'), p=self._mixpinkdrop_probs))
+    raise NotImplementedError(self._noise_type)
 
   def _apply_gaussian(self, image):
     noise = self._rng.normal(
@@ -291,10 +351,28 @@ class ObservationNoise(Wrapper):
     noise = self._pink_mix * state + (1.0 - self._pink_mix) * eps
     return image + noise
 
-  def _validate(self):
-    if self._noise_type not in ('gaussian', 'pink'):
+  def _apply_dropout(self, image):
+    return np.full_like(image, self._dropout_value, dtype=np.float32)
+
+  def _normalize_probs(self, names, probs):
+    probs = np.asarray(probs, dtype=np.float64)
+    if not np.all(np.isfinite(probs)) or np.any(probs < 0):
       raise ValueError(
-          f"ObservationNoise type must be 'gaussian' or 'pink', got "
+          f'ObservationNoise probabilities must be finite and nonnegative: '
+          f'{dict(zip(names, probs))}.')
+    total = float(probs.sum())
+    if total <= 0:
+      raise ValueError(
+          f'ObservationNoise probability sum must be positive: '
+          f'{dict(zip(names, probs))}.')
+    return probs / total
+
+  def _validate(self):
+    if self._noise_type not in (
+        'gaussian', 'pink', 'dropout', 'mixdrop', 'mixpinkdrop'):
+      raise ValueError(
+          f"ObservationNoise type must be one of 'gaussian', 'pink', "
+          f"'dropout', 'mixdrop', or 'mixpinkdrop', got "
           f"{self._noise_type!r}.")
     if not self._keys:
       raise ValueError('ObservationNoise requires at least one observation key.')
@@ -308,6 +386,11 @@ class ObservationNoise(Wrapper):
     if not 0.0 <= self._pink_mix <= 1.0:
       raise ValueError(f'ObservationNoise pink_mix must be in [0, 1], got '
                        f'{self._pink_mix}.')
+    if not np.isfinite(self._dropout_value):
+      raise ValueError(
+          f'ObservationNoise dropout_value must be finite, got '
+          f'{self._dropout_value}.')
+
     spaces = self.env.obs_space
     for key in self._keys:
       if key not in spaces:

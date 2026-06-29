@@ -280,10 +280,59 @@ class TestObservationNoise:
     for lhs, rhs in zip(actual, expected):
       np.testing.assert_array_equal(lhs, rhs)
 
+
+  def test_dropout_zeroes_image_and_logs(self):
+    image = np.full((2, 3, 1), 100, np.uint8)
+    env = _ImageEnv([image])
+    wrapped = embodied.wrappers.ObservationNoise(
+        env, ['image'], noise_type='dropout', dropout_value=0)
+
+    obs = wrapped.step(_action())
+
+    np.testing.assert_array_equal(obs['image'], np.zeros_like(image))
+    assert int(obs['log/obs_noise_code']) == 2
+    assert float(obs['log/obs_noise_is_corrupt']) == 1.0
+    assert float(obs['log/obs_noise_is_dropout']) == 1.0
+    assert float(obs['log/obs_noise_is_pink']) == 0.0
+    assert float(obs['log/obs_noise_input_absdiff']) == 100.0
+
+  def test_mixdrop_forced_dropout_and_clean_modes(self):
+    image = np.full((2, 3, 1), 100, np.uint8)
+
+    drop = embodied.wrappers.ObservationNoise(
+        _ImageEnv([image]), ['image'], noise_type='mixdrop',
+        clean_prob=0.0, dropout_prob=1.0, dropout_value=0)
+    obs = drop.step(_action())
+    np.testing.assert_array_equal(obs['image'], np.zeros_like(image))
+    assert int(obs['log/obs_noise_code']) == 2
+
+    clean = embodied.wrappers.ObservationNoise(
+        _ImageEnv([image]), ['image'], noise_type='mixdrop',
+        clean_prob=1.0, dropout_prob=0.0, dropout_value=0)
+    obs = clean.step(_action())
+    np.testing.assert_array_equal(obs['image'], image)
+    assert int(obs['log/obs_noise_code']) == 0
+    assert float(obs['log/obs_noise_input_absdiff']) == 0.0
+
+  def test_mixpinkdrop_forced_pink_logs(self):
+    image = np.full((1, 1, 1), 100, np.uint8)
+    wrapped = embodied.wrappers.ObservationNoise(
+        _ImageEnv([image], [True]), ['image'], noise_type='mixpinkdrop',
+        clean_prob=0.0, pink_prob=1.0, dropout_prob=0.0,
+        sigma=1.0, pink_alpha=0.9, pink_mix=1.0)
+
+    obs = wrapped.step(_action())
+
+    assert int(obs['log/obs_noise_code']) == 1
+    assert float(obs['log/obs_noise_is_pink']) == 1.0
+    assert obs['image'].shape == image.shape
+    assert obs['image'].dtype == np.uint8
+
+
   def test_validation_errors(self):
     env = _ImageEnv()
     with pytest.raises(ValueError, match='type'):
-      embodied.wrappers.ObservationNoise(env, ['image'], noise_type='dropout')
+      embodied.wrappers.ObservationNoise(env, ['image'], noise_type='not_a_noise')
     with pytest.raises(ValueError, match='at least one'):
       embodied.wrappers.ObservationNoise(
           _ImageEnv(), [], noise_type='gaussian')
@@ -317,3 +366,18 @@ class TestObservationNoise:
     assert pink.obs_noise.get('keys') == ('image',)
     assert pink.obs_noise.type == 'pink'
     assert pink.obs_noise.sigma == 5.0
+
+    mixdrop30 = defaults.update(configs['mixdrop30'])
+    mixpinkdrop = defaults.update(configs['mixpinkdrop'])
+
+    assert mixdrop30.obs_noise.enabled is True
+    assert mixdrop30.obs_noise.type == 'mixdrop'
+    assert mixdrop30.obs_noise.clean_prob == 0.70
+    assert mixdrop30.obs_noise.dropout_prob == 0.30
+
+    assert mixpinkdrop.obs_noise.enabled is True
+    assert mixpinkdrop.obs_noise.type == 'mixpinkdrop'
+    assert mixpinkdrop.obs_noise.clean_prob == 0.60
+    assert mixpinkdrop.obs_noise.pink_prob == 0.25
+    assert mixpinkdrop.obs_noise.dropout_prob == 0.15
+    assert mixpinkdrop.obs_noise.sigma == 5.0
