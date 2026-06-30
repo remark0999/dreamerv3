@@ -35,6 +35,7 @@ class Agent(embodied.jax.Agent):
     self.act_space = act_space
     self.config = config
     _validate_shadow_disagreement_config(config)
+    _validate_teacher_gate_config(config)
 
     exclude = ('is_first', 'is_last', 'is_terminal', 'reward')
     enc_space = {k: v for k, v in obs_space.items() if k not in exclude}
@@ -200,6 +201,9 @@ class Agent(embodied.jax.Agent):
     imgact = concat([imgprevact, lastact], 1)
     assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgfeat))
     assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgact))
+    policy_gate, gate_mets = self._teacher_gate_policy_gate(
+        starts, imgfeat, imgprevact, H, training)
+    metrics.update(prefix(gate_mets, 'teacher_gate'))
     inp = self.feat2tensor(imgfeat)
     los, imgloss_out, mets = imag_loss(
         imgact,
@@ -210,6 +214,7 @@ class Agent(embodied.jax.Agent):
         self.slowval(inp, 2),
         self.retnorm, self.valnorm, self.advnorm,
         update=training,
+        policy_gate=policy_gate,
         contdisc=self.config.contdisc,
         horizon=self.config.horizon,
         **self.config.imag_loss)
@@ -375,6 +380,71 @@ class Agent(embodied.jax.Agent):
     adv = (ret - tarval) / sg(frozen_rscale)
     return {'ret': ret, 'tarval': tarval, 'adv': adv}
 
+
+  def _teacher_gate_policy_gate(self, starts, ref_imgfeat, refprevact, H, training):
+    gate_config = self.config.get('teacher_gate', {})
+    if not gate_config.get('enabled', False):
+      return None, {}
+
+    mode = str(gate_config.get('mode', 'baseline')).lower()
+    beta = float(gate_config.get('beta', 0.5))
+    alpha_min = float(gate_config.get('alpha_min', 0.25))
+    eps = float(gate_config.get('eps', 1e-6))
+
+    ref_leaf = jax.tree.leaves(ref_imgfeat)[0]
+    num_starts = ref_leaf.shape[0]
+
+    if mode in ('disabled', 'none'):
+      return None, {}
+
+    if mode == 'baseline':
+      alpha = jnp.ones((num_starts,), f32)
+      conflict_weighted = jnp.zeros((num_starts,), f32)
+    else:
+      first = jax.tree.map(lambda x: x[:, :1], ref_imgfeat)
+      common = sg(refprevact)
+      auxfeats = []
+      for _ in range(2):
+        _, auxfeat, _ = self.dyn.imagine(starts, common, H, training)
+        auxfeats.append(concat([first, sg(auxfeat)], 1))
+
+      views = [sg(ref_imgfeat), *auxfeats]
+      voffset, vscale = self.valnorm.stats()
+      _, frozen_rscale = self.retnorm.stats()
+      stats = [
+          self._shadow_view_stats(view, voffset, vscale, frozen_rscale)
+          for view in views]
+      adv_views = jnp.stack([x['adv'] for x in stats], 0)
+      direction = _shadow_direction_stats(sg(adv_views)[:, :, 0])
+      conflict_weighted = sg(direction['conflict'] * direction['impact_weight'])
+      alpha = _teacher_gate_alpha_from_conflict(
+          conflict_weighted, beta=beta, alpha_min=alpha_min, eps=eps)
+
+      if mode == 'shuffle':
+        alpha = jax.random.permutation(nj.seed(), alpha, axis=0)
+      elif mode == 'uniform':
+        alpha = jnp.ones_like(alpha) * sg(alpha.mean())
+      elif mode == 'signal':
+        pass
+      else:
+        raise ValueError(f'Unknown teacher_gate.mode: {mode!r}.')
+
+    alpha = sg(jnp.clip(alpha, f32(alpha_min), f32(1.0)))
+    gate = alpha[:, None]
+
+    metrics = {
+        'enabled': f32(1.0),
+        'mode_code': f32(_teacher_gate_mode_code(mode)),
+        'alpha_mean': alpha.mean(),
+        'alpha_min': alpha.min(),
+        'alpha_max': alpha.max(),
+        'alpha_std': alpha.std(),
+        'active_frac': jnp.asarray(alpha < f32(0.999), f32).mean(),
+        'conflict_weighted_mean': conflict_weighted.mean(),
+        'conflict_weighted_max': conflict_weighted.max(),
+    }
+    return gate, metrics
+
   def _apply_replay_context(self, carry, data):
     (enc_carry, dyn_carry, dec_carry, prevact) = carry
     carry = (enc_carry, dyn_carry, dec_carry)
@@ -453,6 +523,30 @@ def _validate_shadow_disagreement_config(config):
     raise ValueError(
         f'shadow_disagreement.views must be exactly 3, got {views}.')
 
+
+
+
+def _validate_teacher_gate_config(config):
+  gate = config.get('teacher_gate', {})
+  if not gate:
+    return
+  mode = str(gate.get('mode', 'disabled')).lower()
+  allowed = ('disabled', 'none', 'baseline', 'signal', 'shuffle', 'uniform')
+  if mode not in allowed:
+    raise ValueError(
+        f'teacher_gate.mode must be one of {allowed}, got {mode!r}.')
+  beta = float(gate.get('beta', 0.5))
+  alpha_min = float(gate.get('alpha_min', 0.25))
+  eps = float(gate.get('eps', 1e-6))
+  if not np.isfinite(beta) or beta < 0:
+    raise ValueError(
+        f'teacher_gate.beta must be finite and nonnegative, got {beta}.')
+  if not np.isfinite(alpha_min) or not 0.0 < alpha_min <= 1.0:
+    raise ValueError(
+        f'teacher_gate.alpha_min must be in (0, 1], got {alpha_min}.')
+  if not np.isfinite(eps) or eps <= 0:
+    raise ValueError(
+        f'teacher_gate.eps must be finite and positive, got {eps}.')
 
 def _shadow_direction_stats(adv_t0):
   adv_t0 = f32(adv_t0)
@@ -591,11 +685,47 @@ def _shadow_disagreement_metrics(
   }
 
 
+
+
+def _teacher_gate_mode_code(mode):
+  return {
+      'disabled': 0,
+      'none': 0,
+      'baseline': 1,
+      'signal': 2,
+      'shuffle': 3,
+      'uniform': 4,
+  }[str(mode).lower()]
+
+
+def _teacher_gate_alpha_from_conflict(
+    conflict_weighted, beta=0.5, alpha_min=0.25, eps=1e-6):
+  conflict_weighted = f32(conflict_weighted)
+  beta = f32(beta)
+  alpha_min = f32(alpha_min)
+  eps = f32(eps)
+  z = (conflict_weighted - conflict_weighted.mean()) / (
+      conflict_weighted.std() + eps)
+  alpha = jnp.exp(-beta * jax.nn.relu(z))
+  alpha = jnp.clip(alpha, alpha_min, f32(1.0))
+  return sg(alpha)
+
+
+def _apply_teacher_gate_to_policy_loss(policy_loss, policy_gate):
+  if policy_gate is None:
+    return policy_loss
+  gate = sg(f32(policy_gate))
+  if gate.ndim == policy_loss.ndim - 1:
+    gate = gate[..., None]
+  gate = jnp.broadcast_to(gate, policy_loss.shape)
+  return policy_loss * gate
+
 def imag_loss(
     act, rew, con,
     policy, value, slowvalue,
     retnorm, valnorm, advnorm,
     update,
+    policy_gate=None,
     contdisc=True,
     slowtar=True,
     horizon=333,
@@ -624,6 +754,7 @@ def imag_loss(
   ents = {k: v.entropy()[:, :-1] for k, v in policy.items()}
   policy_loss = sg(weight[:, :-1]) * -(
       logpi * sg(adv_normed) + actent * sum(ents.values()))
+  policy_loss = _apply_teacher_gate_to_policy_loss(policy_loss, policy_gate)
   losses['policy'] = policy_loss
 
   voffset, vscale = valnorm(ret, update)

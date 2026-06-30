@@ -130,6 +130,7 @@ defaults:
     report: True
     report_gradnorms: False
     shadow_disagreement: {enabled: False, views: 3}
+    teacher_gate: {enabled: False, mode: disabled, beta: 0.5, alpha_min: 0.25, eps: 1e-6}
 
 size1m: &size1m
   .*\.rssm: {deter: 512, hidden: 64, classes: 4}
@@ -240,6 +241,39 @@ mixpinkdrop:
   obs_noise.dropout_value: 0
   obs_noise.log_stats: True
   logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise'
+
+tg0_baseline:
+  agent.teacher_gate.enabled: True
+  agent.teacher_gate.mode: baseline
+  agent.teacher_gate.beta: 0.5
+  agent.teacher_gate.alpha_min: 0.25
+  agent.teacher_gate.eps: 1e-6
+  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate'
+
+tg0_signal:
+  agent.teacher_gate.enabled: True
+  agent.teacher_gate.mode: signal
+  agent.teacher_gate.beta: 0.5
+  agent.teacher_gate.alpha_min: 0.25
+  agent.teacher_gate.eps: 1e-6
+  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate'
+
+tg0_shuffle:
+  agent.teacher_gate.enabled: True
+  agent.teacher_gate.mode: shuffle
+  agent.teacher_gate.beta: 0.5
+  agent.teacher_gate.alpha_min: 0.25
+  agent.teacher_gate.eps: 1e-6
+  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate'
+
+tg0_uniform:
+  agent.teacher_gate.enabled: True
+  agent.teacher_gate.mode: uniform
+  agent.teacher_gate.beta: 0.5
+  agent.teacher_gate.alpha_min: 0.25
+  agent.teacher_gate.eps: 1e-6
+  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate'
+
 
 shadow_disagreement:
   agent.shadow_disagreement.enabled: True
