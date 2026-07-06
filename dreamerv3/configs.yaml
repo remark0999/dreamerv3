@@ -131,6 +131,7 @@ defaults:
     report_gradnorms: False
     shadow_disagreement: {enabled: False, views: 3}
     teacher_gate: {enabled: False, mode: disabled, beta: 0.5, alpha_min: 0.25, eps: 1e-6}
+    latent_noise: {enabled: False, target: deter, prob: 0.0, sigma: 0.0, scale: rms, eps: 1e-6, stop_grad_noise: True, apply_train_policy: True, apply_train_value: False, apply_report_shadow: True, apply_policy_eval: False, apply_env_acting: False}
 
 size1m: &size1m
   .*\.rssm: {deter: 512, hidden: 64, classes: 4}
@@ -218,6 +219,59 @@ pink:
   obs_noise.pink_alpha: 0.9
   obs_noise.pink_mix: 1.0
 
+lnd0_clean:
+  obs_noise.enabled: False
+  agent.latent_noise.enabled: False
+  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate|latent_noise'
+
+lnd0_deter_p30_s005:
+  obs_noise.enabled: False
+  agent.latent_noise.enabled: True
+  agent.latent_noise.target: deter
+  agent.latent_noise.prob: 0.30
+  agent.latent_noise.sigma: 0.05
+  agent.latent_noise.scale: rms
+  agent.latent_noise.eps: 1e-6
+  agent.latent_noise.stop_grad_noise: True
+  agent.latent_noise.apply_train_policy: True
+  agent.latent_noise.apply_train_value: False
+  agent.latent_noise.apply_report_shadow: True
+  agent.latent_noise.apply_policy_eval: False
+  agent.latent_noise.apply_env_acting: False
+  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate|latent_noise'
+
+lnd0_deter_p30_s015:
+  obs_noise.enabled: False
+  agent.latent_noise.enabled: True
+  agent.latent_noise.target: deter
+  agent.latent_noise.prob: 0.30
+  agent.latent_noise.sigma: 0.15
+  agent.latent_noise.scale: rms
+  agent.latent_noise.eps: 1e-6
+  agent.latent_noise.stop_grad_noise: True
+  agent.latent_noise.apply_train_policy: True
+  agent.latent_noise.apply_train_value: False
+  agent.latent_noise.apply_report_shadow: True
+  agent.latent_noise.apply_policy_eval: False
+  agent.latent_noise.apply_env_acting: False
+  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate|latent_noise'
+
+lnd0_deter_p30_s030:
+  obs_noise.enabled: False
+  agent.latent_noise.enabled: True
+  agent.latent_noise.target: deter
+  agent.latent_noise.prob: 0.30
+  agent.latent_noise.sigma: 0.30
+  agent.latent_noise.scale: rms
+  agent.latent_noise.eps: 1e-6
+  agent.latent_noise.stop_grad_noise: True
+  agent.latent_noise.apply_train_policy: True
+  agent.latent_noise.apply_train_value: False
+  agent.latent_noise.apply_report_shadow: True
+  agent.latent_noise.apply_policy_eval: False
+  agent.latent_noise.apply_env_acting: False
+  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate|latent_noise'
+
 mixdrop30:
   obs_noise.enabled: True
   obs_noise.type: mixdrop
@@ -248,7 +302,7 @@ tg0_baseline:
   agent.teacher_gate.beta: 0.5
   agent.teacher_gate.alpha_min: 0.25
   agent.teacher_gate.eps: 1e-6
-  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate'
+  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate|latent_noise'
 
 tg0_signal:
   agent.teacher_gate.enabled: True
@@ -256,7 +310,7 @@ tg0_signal:
   agent.teacher_gate.beta: 0.5
   agent.teacher_gate.alpha_min: 0.25
   agent.teacher_gate.eps: 1e-6
-  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate'
+  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate|latent_noise'
 
 tg0_shuffle:
   agent.teacher_gate.enabled: True
@@ -264,7 +318,7 @@ tg0_shuffle:
   agent.teacher_gate.beta: 0.5
   agent.teacher_gate.alpha_min: 0.25
   agent.teacher_gate.eps: 1e-6
-  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate'
+  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate|latent_noise'
 
 tg0_uniform:
   agent.teacher_gate.enabled: True
@@ -272,7 +326,7 @@ tg0_uniform:
   agent.teacher_gate.beta: 0.5
   agent.teacher_gate.alpha_min: 0.25
   agent.teacher_gate.eps: 1e-6
-  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate'
+  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate|latent_noise'
 
 
 shadow_disagreement:

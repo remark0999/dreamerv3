@@ -36,6 +36,7 @@ class Agent(embodied.jax.Agent):
     self.config = config
     _validate_shadow_disagreement_config(config)
     _validate_teacher_gate_config(config)
+    _validate_latent_noise_config(config)
 
     exclude = ('is_first', 'is_last', 'is_terminal', 'reward')
     enc_space = {k: v for k, v in obs_space.items() if k not in exclude}
@@ -201,9 +202,24 @@ class Agent(embodied.jax.Agent):
     imgact = concat([imgprevact, lastact], 1)
     assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgfeat))
     assert all(x.shape[:2] == (B * K, H + 1) for x in jax.tree.leaves(imgact))
-    policy_gate, gate_mets = self._teacher_gate_policy_gate(
-        starts, imgfeat, imgprevact, H, training)
-    metrics.update(prefix(gate_mets, 'teacher_gate'))
+    latent_config = self.config.get('latent_noise', {})
+    latent_policy_active = (
+        training and
+        latent_config.get('enabled', False) and
+        latent_config.get('apply_train_policy', True))
+    use_latent_policy = (
+        latent_policy_active and
+        float(latent_config.get('prob', 0.0)) > 0.0 and
+        float(latent_config.get('sigma', 0.0)) > 0.0)
+    if use_latent_policy:
+      policy_gate = None
+    else:
+      policy_gate, gate_mets = self._teacher_gate_policy_gate(
+          starts, imgfeat, imgprevact, H, training)
+      metrics.update(prefix(gate_mets, 'teacher_gate'))
+      _, latent_mets = self._apply_latent_noise(
+          starts, active=latent_policy_active)
+      metrics.update(prefix(latent_mets, 'latent_noise'))
     inp = self.feat2tensor(imgfeat)
     los, imgloss_out, mets = imag_loss(
         imgact,
@@ -220,6 +236,41 @@ class Agent(embodied.jax.Agent):
         **self.config.imag_loss)
     losses.update({k: v.mean(1).reshape((B, K)) for k, v in los.items()})
     metrics.update(mets)
+
+    if use_latent_policy:
+      starts_policy, latent_mets = self._apply_latent_noise(starts, active=True)
+      metrics.update(prefix(latent_mets, 'latent_noise'))
+      _, noisy_imgfeat, noisy_imgprevact = self.dyn.imagine(
+          starts_policy, policyfn, H, training)
+      noisy_imgfeat = concat([
+          sg(first, skip=self.config.ac_grads), sg(noisy_imgfeat)], 1)
+      noisy_lastact = policyfn(jax.tree.map(lambda x: x[:, -1], noisy_imgfeat))
+      noisy_lastact = jax.tree.map(lambda x: x[:, None], noisy_lastact)
+      noisy_imgact = concat([noisy_imgprevact, noisy_lastact], 1)
+      assert all(
+          x.shape[:2] == (B * K, H + 1)
+          for x in jax.tree.leaves(noisy_imgfeat))
+      assert all(
+          x.shape[:2] == (B * K, H + 1)
+          for x in jax.tree.leaves(noisy_imgact))
+      policy_gate, gate_mets = self._teacher_gate_policy_gate(
+          starts_policy, noisy_imgfeat, noisy_imgprevact, H, training)
+      metrics.update(prefix(gate_mets, 'teacher_gate'))
+      noisy_inp = self.feat2tensor(noisy_imgfeat)
+      noisy_los, _, _ = imag_loss(
+          noisy_imgact,
+          self.rew(noisy_inp, 2).pred(),
+          self.con(noisy_inp, 2).prob(1),
+          self.pol(noisy_inp, 2),
+          self.val(noisy_inp, 2),
+          self.slowval(noisy_inp, 2),
+          self.retnorm, self.valnorm, self.advnorm,
+          update=False,
+          policy_gate=policy_gate,
+          contdisc=self.config.contdisc,
+          horizon=self.config.horizon,
+          **self.config.imag_loss)
+      losses['policy'] = noisy_los['policy'].mean(1).reshape((B, K))
 
     # Replay
     if self.config.repval_loss:
@@ -330,6 +381,12 @@ class Agent(embodied.jax.Agent):
     dyn_carry, dyn_entries, repfeat = self.dyn.observe(
         dyn_carry, tokens, prevact, reset, training=False)
     starts = self.dyn.starts(dyn_entries, dyn_carry, K)
+    latent_config = self.config.get('latent_noise', {})
+    starts, latent_mets = self._apply_latent_noise(
+        starts,
+        active=(
+            latent_config.get('enabled', False) and
+            latent_config.get('apply_report_shadow', True)))
     first = jax.tree.map(
         lambda x: x[:, -K:].reshape((B * K, 1, *x.shape[2:])), repfeat)
     first = sg(first)
@@ -356,13 +413,17 @@ class Agent(embodied.jax.Agent):
     ret_views = jnp.stack([x['ret'] for x in stats], 0)
     latent_views = jnp.stack([
         sg(self.feat2tensor(view)) for view in views], 0)
-    return _shadow_disagreement_metrics(
+    metrics = _shadow_disagreement_metrics(
         sg(adv_views),
         sg(ret_views),
         sg(latent_views),
         sg(stats[0]['ret']),
         sg(stats[0]['tarval']),
         sg(frozen_rscale))
+    if (latent_config.get('enabled', False) and
+        latent_config.get('apply_report_shadow', True)):
+      metrics.update(prefix(latent_mets, 'latent_noise'))
+    return metrics
 
   def _shadow_view_stats(self, imgfeat, voffset, vscale, frozen_rscale):
     inp = self.feat2tensor(imgfeat)
@@ -379,6 +440,49 @@ class Agent(embodied.jax.Agent):
     tarval = tarval[:, :-1]
     adv = (ret - tarval) / sg(frozen_rscale)
     return {'ret': ret, 'tarval': tarval, 'adv': adv}
+
+
+  def _apply_latent_noise(self, starts, active=True):
+    config = self.config.get('latent_noise', {})
+    enabled = bool(config.get('enabled', False)) and bool(active)
+    prob = float(config.get('prob', 0.0))
+    sigma = float(config.get('sigma', 0.0))
+    metrics = {
+        'enabled': f32(enabled),
+        'prob': f32(prob),
+        'sigma': f32(sigma),
+        'applied_frac': f32(0.0),
+        'deter_absdiff_mean': f32(0.0),
+        'deter_rel_rms_mean': f32(0.0),
+    }
+    if not enabled or prob <= 0.0 or sigma <= 0.0:
+      return dict(starts), metrics
+
+    eps = float(config.get('eps', 1e-6))
+    stop_grad_noise = bool(config.get('stop_grad_noise', True))
+    deter = starts['deter']
+    base = sg(deter) if stop_grad_noise else deter
+    rms = jnp.sqrt(jnp.mean(f32(base) ** 2, axis=-1, keepdims=True)) + f32(eps)
+    mask = jax.random.bernoulli(
+        nj.seed(), f32(prob), deter.shape[:-1] + (1,))
+    mask = mask.astype(deter.dtype)
+    noise = jax.random.normal(nj.seed(), deter.shape, dtype=f32)
+    noise = noise * f32(sigma) * rms
+    if stop_grad_noise:
+      mask = sg(mask)
+      noise = sg(noise)
+    delta = f32(mask) * noise
+    noisy = dict(starts)
+    noisy['deter'] = (f32(deter) + delta).astype(deter.dtype)
+    metrics = {
+        'enabled': f32(1.0),
+        'prob': f32(prob),
+        'sigma': f32(sigma),
+        'applied_frac': f32(mask).mean(),
+        'deter_absdiff_mean': jnp.abs(delta).mean(),
+        'deter_rel_rms_mean': (jnp.abs(delta) / rms).mean(),
+    }
+    return noisy, metrics
 
 
   def _teacher_gate_policy_gate(self, starts, ref_imgfeat, refprevact, H, training):
@@ -547,6 +651,72 @@ def _validate_teacher_gate_config(config):
   if not np.isfinite(eps) or eps <= 0:
     raise ValueError(
         f'teacher_gate.eps must be finite and positive, got {eps}.')
+
+
+def _validate_latent_noise_config(config):
+  latent = config.get('latent_noise', {})
+  if not latent:
+    return
+  target = str(latent.get('target', 'deter'))
+  if target != 'deter':
+    raise ValueError(
+        f'latent_noise.target must be "deter", got {target!r}.')
+  scale = str(latent.get('scale', 'rms'))
+  if scale != 'rms':
+    raise ValueError(
+        f'latent_noise.scale must be "rms", got {scale!r}.')
+
+  def get_float(name, default):
+    value = latent.get(name, default)
+    if isinstance(value, (bool, np.bool_)):
+      raise ValueError(f'latent_noise.{name} must be numeric, got {value}.')
+    try:
+      return float(value)
+    except (TypeError, ValueError) as exc:
+      raise ValueError(
+          f'latent_noise.{name} must be numeric, got {value!r}.') from exc
+
+  prob = get_float('prob', 0.0)
+  sigma = get_float('sigma', 0.0)
+  eps = get_float('eps', 1e-6)
+  if not np.isfinite(prob) or not 0.0 <= prob <= 1.0:
+    raise ValueError(
+        f'latent_noise.prob must be finite and in [0, 1], got {prob}.')
+  if not np.isfinite(sigma) or sigma < 0:
+    raise ValueError(
+        f'latent_noise.sigma must be finite and nonnegative, got {sigma}.')
+  if not np.isfinite(eps) or eps <= 0:
+    raise ValueError(
+        f'latent_noise.eps must be finite and positive, got {eps}.')
+
+  bool_fields = (
+      'stop_grad_noise',
+      'apply_train_policy',
+      'apply_train_value',
+      'apply_report_shadow',
+      'apply_policy_eval',
+      'apply_env_acting',
+  )
+  for name in bool_fields:
+    value = latent.get(name, {
+        'stop_grad_noise': True,
+        'apply_train_policy': True,
+        'apply_train_value': False,
+        'apply_report_shadow': True,
+        'apply_policy_eval': False,
+        'apply_env_acting': False,
+    }[name])
+    if not isinstance(value, (bool, np.bool_)):
+      raise ValueError(
+          f'latent_noise.{name} must be bool, got {value!r}.')
+
+  if latent.get('apply_train_value', False):
+    raise ValueError('latent_noise.apply_train_value=True is not supported.')
+  if latent.get('apply_policy_eval', False):
+    raise ValueError('latent_noise.apply_policy_eval=True is not supported.')
+  if latent.get('apply_env_acting', False):
+    raise ValueError('latent_noise.apply_env_acting=True is not supported.')
+
 
 def _shadow_direction_stats(adv_t0):
   adv_t0 = f32(adv_t0)
