@@ -242,8 +242,9 @@ class Agent(embodied.jax.Agent):
       metrics.update(prefix(latent_mets, 'latent_noise'))
       _, noisy_imgfeat, noisy_imgprevact = self.dyn.imagine(
           starts_policy, policyfn, H, training)
+      first_policy = jax.tree.map(lambda x: x[:, None], starts_policy)
       noisy_imgfeat = concat([
-          sg(first, skip=self.config.ac_grads), sg(noisy_imgfeat)], 1)
+          sg(first_policy, skip=self.config.ac_grads), sg(noisy_imgfeat)], 1)
       noisy_lastact = policyfn(jax.tree.map(lambda x: x[:, -1], noisy_imgfeat))
       noisy_lastact = jax.tree.map(lambda x: x[:, None], noisy_lastact)
       noisy_imgact = concat([noisy_imgprevact, noisy_lastact], 1)

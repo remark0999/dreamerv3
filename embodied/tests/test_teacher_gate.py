@@ -95,3 +95,25 @@ def test_imag_loss_source_applies_gate_before_policy_assignment_only():
   repl_source = inspect.getsource(dreamer_agent.repl_loss)
   assert '_apply_teacher_gate_to_policy_loss' not in repl_source
 
+def test_latent_noise_noisy_policy_branch_uses_noisy_first_feature():
+  from pathlib import Path
+
+  text = Path("dreamerv3/agent.py").read_text()
+
+  start = text.index("starts_policy, latent_mets = self._apply_latent_noise")
+  end = text.index("losses['policy'] = noisy_los['policy'].mean", start)
+  block = text[start:end]
+
+  assert (
+      "first_policy = jax.tree.map(lambda x: x[:, None], starts_policy)"
+      in block
+  )
+  assert (
+      "sg(first_policy, skip=self.config.ac_grads), sg(noisy_imgfeat)"
+      in block
+  )
+  assert (
+      "sg(first, skip=self.config.ac_grads), sg(noisy_imgfeat)"
+      not in block
+  )
+
