@@ -104,13 +104,16 @@ def test_latent_noise_noisy_policy_branch_uses_noisy_first_feature():
   end = text.index("losses['policy'] = noisy_los['policy'].mean", start)
   block = text[start:end]
 
-  assert (
-      "first_policy = jax.tree.map(lambda x: x[:, None], starts_policy)"
-      in block
-  )
+  assert "first_policy = dict(first)" in block
+  assert "for key, value in starts_policy.items():" in block
+  assert "first_policy[key] = value[:, None]" in block
   assert (
       "sg(first_policy, skip=self.config.ac_grads), sg(noisy_imgfeat)"
       in block
+  )
+  assert (
+      "jax.tree.map(lambda x: x[:, None], starts_policy)"
+      not in block
   )
   assert (
       "sg(first, skip=self.config.ac_grads), sg(noisy_imgfeat)"
