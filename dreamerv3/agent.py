@@ -238,16 +238,29 @@ class Agent(embodied.jax.Agent):
     metrics.update(mets)
 
     if use_latent_policy:
-      starts_policy, latent_mets = self._apply_latent_noise(starts, active=True)
-      metrics.update(prefix(latent_mets, 'latent_noise'))
-      _, noisy_imgfeat, noisy_imgprevact = self.dyn.imagine(
-          starts_policy, policyfn, H, training)
-      first_policy = dict(first)
-      for key, value in starts_policy.items():
-        if key in first_policy:
-          first_policy[key] = value[:, None]
-      noisy_imgfeat = concat([
-          sg(first_policy, skip=self.config.ac_grads), sg(noisy_imgfeat)], 1)
+      timing = self.config.agent.latent_noise.timing
+      if timing == 'start':
+        starts_policy, latent_mets = self._apply_latent_noise(starts, active=True)
+        metrics.update(prefix(latent_mets, 'latent_noise'))
+        _, noisy_imgfeat, noisy_imgprevact = self.dyn.imagine(
+            starts_policy, policyfn, H, training)
+        first_policy = dict(first)
+        for key, value in starts_policy.items():
+          if key in first_policy:
+            first_policy[key] = value[:, None]
+        noisy_imgfeat = concat([
+            sg(first_policy, skip=self.config.ac_grads), sg(noisy_imgfeat)], 1)
+      elif timing == 'future_feature':
+        starts_policy = starts
+        _, noisy_imgfeat, noisy_imgprevact = self.dyn.imagine(
+            starts_policy, policyfn, H, training)
+        noisy_imgfeat, latent_mets = self._apply_latent_noise(
+            noisy_imgfeat, active=True)
+        metrics.update(prefix(latent_mets, 'latent_noise'))
+        noisy_imgfeat = concat([
+            sg(first, skip=self.config.ac_grads), sg(noisy_imgfeat)], 1)
+      else:
+        raise ValueError(f'Unknown latent_noise timing: {timing}')
       noisy_lastact = policyfn(jax.tree.map(lambda x: x[:, -1], noisy_imgfeat))
       noisy_lastact = jax.tree.map(lambda x: x[:, None], noisy_lastact)
       noisy_imgact = concat([noisy_imgprevact, noisy_lastact], 1)
@@ -658,6 +671,10 @@ def _validate_teacher_gate_config(config):
 
 
 def _validate_latent_noise_config(config):
+  if config.agent.latent_noise.timing not in ('start', 'future_feature'):
+    raise ValueError(
+        'agent.latent_noise.timing must be start or future_feature, '
+        f'got {config.agent.latent_noise.timing!r}')
   latent = config.get('latent_noise', {})
   if not latent:
     return

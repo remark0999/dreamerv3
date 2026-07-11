@@ -95,28 +95,33 @@ def test_imag_loss_source_applies_gate_before_policy_assignment_only():
   repl_source = inspect.getsource(dreamer_agent.repl_loss)
   assert '_apply_teacher_gate_to_policy_loss' not in repl_source
 
-def test_latent_noise_noisy_policy_branch_uses_noisy_first_feature():
+def test_latent_noise_start_timing_uses_noisy_first_feature():
   from pathlib import Path
 
   text = Path("dreamerv3/agent.py").read_text()
-
-  start = text.index("starts_policy, latent_mets = self._apply_latent_noise")
-  end = text.index("losses['policy'] = noisy_los['policy'].mean", start)
+  start = text.index("if timing == 'start':")
+  end = text.index("elif timing == 'future_feature':", start)
   block = text[start:end]
 
+  assert "starts_policy, latent_mets = self._apply_latent_noise(starts, active=True)" in block
   assert "first_policy = dict(first)" in block
   assert "for key, value in starts_policy.items():" in block
   assert "first_policy[key] = value[:, None]" in block
-  assert (
-      "sg(first_policy, skip=self.config.ac_grads), sg(noisy_imgfeat)"
-      in block
-  )
-  assert (
-      "jax.tree.map(lambda x: x[:, None], starts_policy)"
-      not in block
-  )
-  assert (
-      "sg(first, skip=self.config.ac_grads), sg(noisy_imgfeat)"
-      not in block
-  )
+  assert "sg(first_policy, skip=self.config.ac_grads), sg(noisy_imgfeat)" in block
+  assert "sg(first, skip=self.config.ac_grads), sg(noisy_imgfeat)" not in block
 
+
+def test_latent_noise_future_feature_timing_keeps_clean_first_and_noises_future():
+  from pathlib import Path
+
+  text = Path("dreamerv3/agent.py").read_text()
+  start = text.index("elif timing == 'future_feature':")
+  end = text.index("else:", start)
+  block = text[start:end]
+
+  assert "starts_policy = starts" in block
+  assert "noisy_imgfeat, latent_mets = self._apply_latent_noise(" in block
+  assert "noisy_imgfeat, active=True)" in block
+  assert "sg(first, skip=self.config.ac_grads), sg(noisy_imgfeat)" in block
+  assert "first_policy = dict(first)" not in block
+  assert "starts_policy, latent_mets = self._apply_latent_noise(starts, active=True)" not in block

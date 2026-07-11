@@ -131,7 +131,7 @@ defaults:
     report_gradnorms: False
     shadow_disagreement: {enabled: False, views: 3}
     teacher_gate: {enabled: False, mode: disabled, beta: 0.5, alpha_min: 0.25, eps: 1e-6}
-    latent_noise: {enabled: False, target: deter, prob: 0.0, sigma: 0.0, scale: rms, eps: 1e-6, stop_grad_noise: True, apply_train_policy: True, apply_train_value: False, apply_report_shadow: True, apply_policy_eval: False, apply_env_acting: False}
+    latent_noise: {enabled: False, target: deter, timing: start, prob: 0.0, sigma: 0.0, scale: rms, eps: 1e-6, stop_grad_noise: True, apply_train_policy: True, apply_train_value: False, apply_report_shadow: True, apply_policy_eval: False, apply_env_acting: False}
 
 size1m: &size1m
   .*\.rssm: {deter: 512, hidden: 64, classes: 4}
