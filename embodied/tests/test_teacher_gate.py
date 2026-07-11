@@ -125,3 +125,13 @@ def test_latent_noise_future_feature_timing_keeps_clean_first_and_noises_future(
   assert "sg(first, skip=self.config.ac_grads), sg(noisy_imgfeat)" in block
   assert "first_policy = dict(first)" not in block
   assert "starts_policy, latent_mets = self._apply_latent_noise(starts, active=True)" not in block
+
+def test_latent_noise_timing_uses_agent_subconfig_namespace():
+  from pathlib import Path
+
+  text = Path("dreamerv3/agent.py").read_text()
+
+  assert "config.latent_noise.timing" in text
+  assert "self.config.latent_noise.timing" in text
+  assert "config.agent.latent_noise.timing" not in text
+  assert "self.config.agent.latent_noise.timing" not in text

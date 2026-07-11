@@ -238,7 +238,7 @@ class Agent(embodied.jax.Agent):
     metrics.update(mets)
 
     if use_latent_policy:
-      timing = self.config.agent.latent_noise.timing
+      timing = self.config.latent_noise.timing
       if timing == 'start':
         starts_policy, latent_mets = self._apply_latent_noise(starts, active=True)
         metrics.update(prefix(latent_mets, 'latent_noise'))
@@ -671,10 +671,10 @@ def _validate_teacher_gate_config(config):
 
 
 def _validate_latent_noise_config(config):
-  if config.agent.latent_noise.timing not in ('start', 'future_feature'):
+  if config.latent_noise.timing not in ('start', 'future_feature'):
     raise ValueError(
         'agent.latent_noise.timing must be start or future_feature, '
-        f'got {config.agent.latent_noise.timing!r}')
+        f'got {config.latent_noise.timing!r}')
   latent = config.get('latent_noise', {})
   if not latent:
     return
