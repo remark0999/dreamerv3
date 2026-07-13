@@ -511,6 +511,7 @@ class Agent(embodied.jax.Agent):
     beta = float(gate_config.get('beta', 0.5))
     alpha_min = float(gate_config.get('alpha_min', 0.25))
     eps = float(gate_config.get('eps', 1e-6))
+    normalize_alpha = str(gate_config.get('normalize_alpha', 'none')).lower()
 
     ref_leaf = jax.tree.leaves(ref_imgfeat)[0]
     num_starts = ref_leaf.shape[0]
@@ -551,6 +552,11 @@ class Agent(embodied.jax.Agent):
         raise ValueError(f'Unknown teacher_gate.mode: {mode!r}.')
 
     alpha = sg(jnp.clip(alpha, f32(alpha_min), f32(1.0)))
+    alpha_raw_mean = alpha.mean()
+    alpha_raw_min = alpha.min()
+    alpha_raw_max = alpha.max()
+    alpha = _normalize_teacher_gate_alpha(
+        alpha, normalize_alpha=normalize_alpha, eps=eps)
     gate = alpha[:, None]
 
     metrics = {
@@ -560,6 +566,10 @@ class Agent(embodied.jax.Agent):
         'alpha_min': alpha.min(),
         'alpha_max': alpha.max(),
         'alpha_std': alpha.std(),
+        'alpha_raw_mean': alpha_raw_mean,
+        'alpha_raw_min': alpha_raw_min,
+        'alpha_raw_max': alpha_raw_max,
+        'normalize_code': f32(1.0 if normalize_alpha == 'mean' else 0.0),
         'active_frac': jnp.asarray(alpha < f32(0.999), f32).mean(),
         'conflict_weighted_mean': conflict_weighted.mean(),
         'conflict_weighted_max': conflict_weighted.max(),
@@ -659,6 +669,11 @@ def _validate_teacher_gate_config(config):
   beta = float(gate.get('beta', 0.5))
   alpha_min = float(gate.get('alpha_min', 0.25))
   eps = float(gate.get('eps', 1e-6))
+  normalize_alpha = str(gate.get('normalize_alpha', 'none')).lower()
+  if normalize_alpha not in ('none', 'mean'):
+    raise ValueError(
+        'teacher_gate.normalize_alpha must be one of ("none", "mean"), '
+        f'got {normalize_alpha!r}.')
   if not np.isfinite(beta) or beta < 0:
     raise ValueError(
         f'teacher_gate.beta must be finite and nonnegative, got {beta}.')
@@ -900,6 +915,21 @@ def _teacher_gate_alpha_from_conflict(
   alpha = jnp.exp(-beta * jax.nn.relu(z))
   alpha = jnp.clip(alpha, alpha_min, f32(1.0))
   return sg(alpha)
+
+
+
+def _normalize_teacher_gate_alpha(alpha, normalize_alpha='none', eps=1e-6):
+  normalize_alpha = str(normalize_alpha).lower()
+  alpha = f32(alpha)
+  eps = f32(eps)
+  if normalize_alpha == 'none':
+    return sg(alpha)
+  if normalize_alpha == 'mean':
+    denom = jnp.maximum(sg(alpha.mean()), eps)
+    return sg(alpha / denom)
+  raise ValueError(
+      'teacher_gate.normalize_alpha must be one of ("none", "mean"), '
+      f'got {normalize_alpha!r}.')
 
 
 def _apply_teacher_gate_to_policy_loss(policy_loss, policy_gate):

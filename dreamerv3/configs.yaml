@@ -130,7 +130,7 @@ defaults:
     report: True
     report_gradnorms: False
     shadow_disagreement: {enabled: False, views: 3}
-    teacher_gate: {enabled: False, mode: disabled, beta: 0.5, alpha_min: 0.25, eps: 1e-6}
+    teacher_gate: {enabled: False, mode: disabled, beta: 0.5, alpha_min: 0.25, eps: 1e-6, normalize_alpha: none}
     latent_noise: {enabled: False, target: deter, timing: start, prob: 0.0, sigma: 0.0, scale: rms, eps: 1e-6, stop_grad_noise: True, apply_train_policy: True, apply_train_value: False, apply_report_shadow: True, apply_policy_eval: False, apply_env_acting: False}
 
 size1m: &size1m
@@ -328,6 +328,34 @@ tg0_uniform:
   agent.teacher_gate.eps: 1e-6
   logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate|latent_noise'
 
+
+
+tg0_signal_normmean:
+  agent.teacher_gate.enabled: True
+  agent.teacher_gate.mode: signal
+  agent.teacher_gate.beta: 0.5
+  agent.teacher_gate.alpha_min: 0.25
+  agent.teacher_gate.eps: 1e-6
+  agent.teacher_gate.normalize_alpha: mean
+  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate|latent_noise'
+
+tg0_shuffle_normmean:
+  agent.teacher_gate.enabled: True
+  agent.teacher_gate.mode: shuffle
+  agent.teacher_gate.beta: 0.5
+  agent.teacher_gate.alpha_min: 0.25
+  agent.teacher_gate.eps: 1e-6
+  agent.teacher_gate.normalize_alpha: mean
+  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate|latent_noise'
+
+tg0_uniform_normmean:
+  agent.teacher_gate.enabled: True
+  agent.teacher_gate.mode: uniform
+  agent.teacher_gate.beta: 0.5
+  agent.teacher_gate.alpha_min: 0.25
+  agent.teacher_gate.eps: 1e-6
+  agent.teacher_gate.normalize_alpha: mean
+  logger.filter: 'score|length|fps|ratio|train/loss/|train/rand/|shadow/|obs_noise|teacher_gate|latent_noise'
 
 shadow_disagreement:
   agent.shadow_disagreement.enabled: True

@@ -135,3 +135,62 @@ def test_latent_noise_timing_uses_agent_subconfig_namespace():
   assert "self.config.latent_noise.timing" in text
   assert "config.agent.latent_noise.timing" not in text
   assert "self.config.agent.latent_noise.timing" not in text
+
+def test_teacher_gate_normalize_alpha_mean_preserves_relative_assignment():
+  alpha = jnp.array([0.5, 1.0], jnp.float32)
+  out = dreamer_agent._normalize_teacher_gate_alpha(
+      alpha, normalize_alpha='mean', eps=1e-6)
+
+  np.testing.assert_allclose(float(out.mean()), 1.0, rtol=1e-6, atol=1e-6)
+  assert float(out[1]) > float(out[0])
+  assert float(out[1]) > 1.0
+
+
+def test_teacher_gate_normalize_alpha_none_is_identity():
+  alpha = jnp.array([0.25, 0.5, 1.0], jnp.float32)
+  out = dreamer_agent._normalize_teacher_gate_alpha(
+      alpha, normalize_alpha='none', eps=1e-6)
+
+  np.testing.assert_allclose(np.asarray(out), np.asarray(alpha))
+
+
+def test_teacher_gate_normalize_alpha_validation_errors():
+  with pytest.raises(ValueError, match='teacher_gate.normalize_alpha'):
+    dreamer_agent._validate_teacher_gate_config(
+        elements.Config(teacher_gate=dict(
+            enabled=True, mode='signal', normalize_alpha='bad')))
+
+
+def test_tg0_normmean_configs_parse():
+  path = pathlib.Path(__file__).parents[2] / 'dreamerv3' / 'configs.yaml'
+  configs = yaml.YAML(typ='safe').load(path.read_text())
+  defaults = elements.Config(configs['defaults'])
+
+  expected = {
+      'tg0_signal_normmean': 'signal',
+      'tg0_shuffle_normmean': 'shuffle',
+      'tg0_uniform_normmean': 'uniform',
+  }
+
+  for config_name, mode in expected.items():
+    cfg = defaults.update(configs[config_name])
+    assert cfg.agent.teacher_gate.enabled is True
+    assert cfg.agent.teacher_gate.mode == mode
+    assert cfg.agent.teacher_gate.normalize_alpha == 'mean'
+    assert 'teacher_gate' in cfg.logger.filter
+
+
+def test_teacher_gate_source_normalizes_alpha_before_gate_creation():
+  source = inspect.getsource(dreamer_agent.Agent._teacher_gate_policy_gate)
+
+  normalize_read = "normalize_alpha = str("
+  raw_mean = "alpha_raw_mean = alpha.mean()"
+  normalize_call = "_normalize_teacher_gate_alpha("
+  gate_create = "gate = alpha[:, None]"
+
+  assert normalize_read in source
+  assert raw_mean in source
+  assert normalize_call in source
+  assert gate_create in source
+  assert source.index(raw_mean) < source.index(normalize_call)
+  assert source.index(normalize_call) < source.index(gate_create)
