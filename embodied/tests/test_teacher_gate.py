@@ -194,3 +194,69 @@ def test_teacher_gate_source_normalizes_alpha_before_gate_creation():
   assert gate_create in source
   assert source.index(raw_mean) < source.index(normalize_call)
   assert source.index(normalize_call) < source.index(gate_create)
+
+def test_teacher_gate_alpha_from_vi_conflict_behavior():
+  vi_abs = jnp.array([1.0, 2.0, 2.0], jnp.float32)
+  pure_conflict = jnp.array([0.0, 0.5, 1.0], jnp.float32)
+
+  alpha_vi, alpha_hybrid, vi_norm = dreamer_agent._teacher_gate_alpha_from_vi_conflict(
+      vi_abs, pure_conflict, beta=1.0, alpha_min=0.25, eps=1e-6,
+      vi_threshold=1.0)
+
+  assert alpha_vi.shape == vi_abs.shape
+  assert alpha_hybrid.shape == vi_abs.shape
+  assert vi_norm.shape == vi_abs.shape
+  assert float(alpha_vi.min()) >= 0.25
+  assert float(alpha_vi.max()) <= 1.0
+  assert float(alpha_hybrid.min()) >= 0.25
+  assert float(alpha_hybrid.max()) <= 1.0
+
+  # Zero conflict keeps the sample even when VI is nonzero.
+  np.testing.assert_allclose(float(alpha_hybrid[0]), 1.0, rtol=1e-6, atol=1e-6)
+  # Full conflict uses the VI-only alpha.
+  np.testing.assert_allclose(
+      float(alpha_hybrid[2]), float(alpha_vi[2]), rtol=1e-6, atol=1e-6)
+  # Partial conflict should be between keep-all and VI-only.
+  assert float(alpha_hybrid[1]) >= float(alpha_vi[1])
+  assert float(alpha_hybrid[1]) <= 1.0
+
+
+def test_tg0_hybrid_configs_parse():
+  path = pathlib.Path(__file__).parents[2] / 'dreamerv3' / 'configs.yaml'
+  configs = yaml.YAML(typ='safe').load(path.read_text())
+  defaults = elements.Config(configs['defaults'])
+
+  expected = {
+      'tg0_vi_only': 'vi_only',
+      'tg0_hybrid': 'hybrid',
+      'tg0_hybrid_shuffle': 'hybrid_shuffle',
+  }
+
+  for config_name, mode in expected.items():
+    cfg = defaults.update(configs[config_name])
+    assert cfg.agent.teacher_gate.enabled is True
+    assert cfg.agent.teacher_gate.mode == mode
+    assert cfg.agent.teacher_gate.vi_threshold == 1.0
+    assert 'teacher_gate' in cfg.logger.filter
+
+
+def test_teacher_gate_hybrid_validation_errors():
+  with pytest.raises(ValueError, match='teacher_gate.vi_threshold'):
+    dreamer_agent._validate_teacher_gate_config(
+        elements.Config(teacher_gate=dict(
+            enabled=True, mode='hybrid', vi_threshold=-1.0)))
+
+
+def test_teacher_gate_source_has_hybrid_modes_and_metrics():
+  source = inspect.getsource(dreamer_agent.Agent._teacher_gate_policy_gate)
+
+  assert "mode == 'vi_only'" in source
+  assert "mode == 'hybrid'" in source
+  assert "mode == 'hybrid_shuffle'" in source
+  assert "vi_abs_t0 = sg(jnp.abs(stats[0]['adv'][:, 0]))" in source
+  assert "pure_conflict = sg(direction['conflict'])" in source
+  assert "impact_weight = sg(direction['impact_weight'])" in source
+  assert "_teacher_gate_alpha_from_vi_conflict(" in source
+  assert "'vi_abs_t0_mean': vi_abs_t0.mean()" in source
+  assert "'pure_conflict_mean': pure_conflict.mean()" in source
+  assert "'alpha_hybrid_mean': alpha_hybrid.mean()" in source

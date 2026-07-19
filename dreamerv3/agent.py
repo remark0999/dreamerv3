@@ -513,6 +513,8 @@ class Agent(embodied.jax.Agent):
     eps = float(gate_config.get('eps', 1e-6))
     normalize_alpha = str(gate_config.get('normalize_alpha', 'none')).lower()
 
+    vi_threshold = float(gate_config.get('vi_threshold', 1.0))
+
     ref_leaf = jax.tree.leaves(ref_imgfeat)[0]
     num_starts = ref_leaf.shape[0]
 
@@ -522,6 +524,12 @@ class Agent(embodied.jax.Agent):
     if mode == 'baseline':
       alpha = jnp.ones((num_starts,), f32)
       conflict_weighted = jnp.zeros((num_starts,), f32)
+      pure_conflict = jnp.zeros((num_starts,), f32)
+      impact_weight = jnp.zeros((num_starts,), f32)
+      vi_abs_t0 = jnp.zeros((num_starts,), f32)
+      vi_norm = jnp.zeros((num_starts,), f32)
+      alpha_vi = jnp.ones((num_starts,), f32)
+      alpha_hybrid = jnp.ones((num_starts,), f32)
     else:
       first = jax.tree.map(lambda x: x[:, :1], ref_imgfeat)
       common = sg(refprevact)
@@ -538,16 +546,28 @@ class Agent(embodied.jax.Agent):
           for view in views]
       adv_views = jnp.stack([x['adv'] for x in stats], 0)
       direction = _shadow_direction_stats(sg(adv_views)[:, :, 0])
-      conflict_weighted = sg(direction['conflict'] * direction['impact_weight'])
-      alpha = _teacher_gate_alpha_from_conflict(
+      pure_conflict = sg(direction['conflict'])
+      impact_weight = sg(direction['impact_weight'])
+      conflict_weighted = sg(pure_conflict * impact_weight)
+      vi_abs_t0 = sg(jnp.abs(stats[0]['adv'][:, 0]))
+      alpha_vi, alpha_hybrid, vi_norm = _teacher_gate_alpha_from_vi_conflict(
+          vi_abs_t0, pure_conflict, beta=beta, alpha_min=alpha_min,
+          eps=eps, vi_threshold=vi_threshold)
+      alpha_signal = _teacher_gate_alpha_from_conflict(
           conflict_weighted, beta=beta, alpha_min=alpha_min, eps=eps)
 
       if mode == 'shuffle':
-        alpha = jax.random.permutation(nj.seed(), alpha, axis=0)
+        alpha = jax.random.permutation(nj.seed(), alpha_signal, axis=0)
       elif mode == 'uniform':
-        alpha = jnp.ones_like(alpha) * sg(alpha.mean())
+        alpha = jnp.ones_like(alpha_signal) * sg(alpha_signal.mean())
       elif mode == 'signal':
-        pass
+        alpha = alpha_signal
+      elif mode == 'vi_only':
+        alpha = alpha_vi
+      elif mode == 'hybrid':
+        alpha = alpha_hybrid
+      elif mode == 'hybrid_shuffle':
+        alpha = jax.random.permutation(nj.seed(), alpha_hybrid, axis=0)
       else:
         raise ValueError(f'Unknown teacher_gate.mode: {mode!r}.')
 
@@ -573,6 +593,18 @@ class Agent(embodied.jax.Agent):
         'active_frac': jnp.asarray(alpha < f32(0.999), f32).mean(),
         'conflict_weighted_mean': conflict_weighted.mean(),
         'conflict_weighted_max': conflict_weighted.max(),
+        'pure_conflict_mean': pure_conflict.mean(),
+        'pure_conflict_max': pure_conflict.max(),
+        'impact_weight_mean': impact_weight.mean(),
+        'impact_weight_max': impact_weight.max(),
+        'vi_abs_t0_mean': vi_abs_t0.mean(),
+        'vi_abs_t0_max': vi_abs_t0.max(),
+        'vi_norm_mean': vi_norm.mean(),
+        'vi_norm_max': vi_norm.max(),
+        'alpha_vi_mean': alpha_vi.mean(),
+        'alpha_vi_min': alpha_vi.min(),
+        'alpha_hybrid_mean': alpha_hybrid.mean(),
+        'alpha_hybrid_min': alpha_hybrid.min(),
     }
     return gate, metrics
 
@@ -662,7 +694,7 @@ def _validate_teacher_gate_config(config):
   if not gate:
     return
   mode = str(gate.get('mode', 'disabled')).lower()
-  allowed = ('disabled', 'none', 'baseline', 'signal', 'shuffle', 'uniform')
+  allowed = ('disabled', 'none', 'baseline', 'signal', 'shuffle', 'uniform', 'vi_only', 'hybrid', 'hybrid_shuffle')
   if mode not in allowed:
     raise ValueError(
         f'teacher_gate.mode must be one of {allowed}, got {mode!r}.')
@@ -674,6 +706,11 @@ def _validate_teacher_gate_config(config):
     raise ValueError(
         'teacher_gate.normalize_alpha must be one of ("none", "mean"), '
         f'got {normalize_alpha!r}.')
+  vi_threshold = float(gate.get('vi_threshold', 1.0))
+  if not np.isfinite(vi_threshold) or vi_threshold < 0.0:
+    raise ValueError(
+        f'teacher_gate.vi_threshold must be finite and nonnegative, '
+        f'got {vi_threshold}.')
   if not np.isfinite(beta) or beta < 0:
     raise ValueError(
         f'teacher_gate.beta must be finite and nonnegative, got {beta}.')
@@ -901,6 +938,9 @@ def _teacher_gate_mode_code(mode):
       'signal': 2,
       'shuffle': 3,
       'uniform': 4,
+      'vi_only': 5,
+      'hybrid': 6,
+      'hybrid_shuffle': 7,
   }[str(mode).lower()]
 
 
@@ -916,6 +956,26 @@ def _teacher_gate_alpha_from_conflict(
   alpha = jnp.clip(alpha, alpha_min, f32(1.0))
   return sg(alpha)
 
+
+
+
+def _teacher_gate_alpha_from_vi_conflict(
+    vi_abs, pure_conflict, beta=0.5, alpha_min=0.25, eps=1e-6,
+    vi_threshold=1.0):
+  vi_abs = f32(vi_abs)
+  pure_conflict = jnp.clip(f32(pure_conflict), 0, 1)
+  beta = f32(beta)
+  alpha_min = f32(alpha_min)
+  eps = f32(eps)
+  vi_threshold = f32(vi_threshold)
+  vi_ref = jnp.maximum(sg(jnp.median(vi_abs)), eps)
+  vi_norm = vi_abs / vi_ref
+  vi_excess = jax.nn.relu(vi_norm - vi_threshold)
+  alpha_vi = jnp.exp(-beta * vi_excess)
+  alpha_vi = jnp.clip(alpha_vi, alpha_min, f32(1.0))
+  alpha_hybrid = 1 - pure_conflict * (1 - alpha_vi)
+  alpha_hybrid = jnp.clip(alpha_hybrid, alpha_min, f32(1.0))
+  return sg(alpha_vi), sg(alpha_hybrid), sg(vi_norm)
 
 
 def _normalize_teacher_gate_alpha(alpha, normalize_alpha='none', eps=1e-6):
