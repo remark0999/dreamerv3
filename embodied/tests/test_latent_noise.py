@@ -15,6 +15,7 @@ def _latent_config(**overrides):
   config = dict(
       enabled=True,
       target='deter',
+      timing='start',
       prob=1.0,
       sigma=0.5,
       scale='rms',
